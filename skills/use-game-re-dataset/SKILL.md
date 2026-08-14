@@ -1,6 +1,6 @@
 ---
 name: use-game-re-dataset
-description: Use when consuming the OSS world-model dataset (oss://vast-world-model-data-bj/game, schema v8) from the algorithm side — pinning catalog snapshots, selecting sessions, decoding modalities including instance segmentation — or when reading the project's Feishu docs via lark-cli. Distributed via the game-re-skills repo: npx skills add <org>/game-re-skills.
+description: Use when consuming the OSS world-model dataset (oss://vast-world-model-data-bj/game, schema v8) from the algorithm side — pinning catalog snapshots, selecting sessions, decoding modalities including instance segmentation — or when reading the project's Feishu docs via lark-cli. Distributed via the game-re-skills repo (npx skills add <org>/game-re-skills).
 ---
 
 # use-game-re-dataset
