@@ -1,13 +1,13 @@
 ---
 name: use-game-re-dataset
-description: Use when consuming the OSS world-model dataset (oss://vast-world-model-data-bj/game, schema v8) from the algorithm side — pinning catalog snapshots, selecting sessions, decoding modalities including instance segmentation — or when reading the project's Feishu docs via lark-cli. Distributed via the game-re-skills repo (npx skills add <org>/game-re-skills).
+description: Use when consuming the game-re world-model dataset (OSS, schema v8) from the algorithm side — pinning catalog snapshots, selecting sessions, decoding modalities including instance segmentation — or when reading the project's Feishu docs via lark-cli. Distributed via the game-re-skills repo (npx skills add neeetman/game-re-skills). Access parameters (bucket, endpoints, credentials) come from the Feishu docs, never from this file.
 ---
 
 # use-game-re-dataset
 
-世界模型训练数据集在 `oss://vast-world-model-data-bj/game/`（阿里云 OSS 北京，schema v8）。
-本 skill 给算法侧：文档在哪、怎么访问数据、格式上会咬人的点。字段级权威是飞书文档树，
-本文只放必须常驻的事实。
+世界模型训练数据集在阿里云 OSS（schema v8）。本 skill 给算法侧：文档在哪、怎么访问数据、
+格式上会咬人的点。**具体访问参数（bucket、endpoint、凭证获取方式、开发机地址）一律从下方
+飞书文档获取，本文只放公开无害的常驻事实**——先读文档拿参数，再访问数据。
 
 ## 文档树（权威入口）
 
@@ -46,11 +46,11 @@ lark-cli docs +fetch --doc <token> --scope section --start-block-id <标题id>
 
 ## 数据访问
 
-- **Endpoint**：公网 `https://oss-cn-beijing.aliyuncs.com`；阿里云 VPC 内（开发机 10.116.0.28、K8s Pod）
-  用 `https://oss-cn-beijing-internal.aliyuncs.com`（免流量费）。
-- **凭证**：阿里云 RAM 用户 AccessKey，自助创建：signin.aliyun.com → RAM 用户登录（账号形如
-  `you@<主账号UID>.onaliyun.com`，不是 aliyunidaas 门户）→ 右上角 AccessKey 管理。
-  凭证放环境变量，不进代码与命令行。
+- **访问参数**：bucket 名、公网/VPC 内 endpoint、开发机地址，见
+  [数据使用与技术参考](https://a9ihi0un9c.feishu.cn/wiki/DWCBwd8U7iyhArkvBVac5krBnPd)与
+  [阿里云推理集群使用指南](https://a9ihi0un9c.feishu.cn/wiki/NweSw3ecQisRVzkUCaXcdhgEntd)（需飞书权限）。
+- **凭证**：阿里云 RAM 用户 AccessKey，登录控制台自助创建（RAM 用户登录入口，不是 aliyunidaas
+  门户；详见集群使用指南）。凭证放环境变量，不进代码与命令行。
 - **boto3（S3 兼容）必须两项配置**，缺一必错：
 
 ```python
@@ -65,18 +65,18 @@ config = Config(s3={"addressing_style": "virtual"},          # 缺省 path-style
 ```sql
 INSTALL httpfs; LOAD httpfs;
 CREATE SECRET oss (TYPE S3, KEY_ID '…', SECRET '…',
-    ENDPOINT 'oss-cn-beijing.aliyuncs.com', URL_STYLE 'vhost', REGION 'cn-beijing');
+    ENDPOINT '<endpoint 主机名>', URL_STYLE 'vhost', REGION '<地域>');
 SELECT session_key, prefix
-FROM read_parquet('s3://vast-world-model-data-bj/game/catalog/snapshots/<stamp>/sessions.parquet')
+FROM read_parquet('s3://<bucket>/<数据根>/catalog/snapshots/<stamp>/sessions.parquet')
 WHERE viewpoint = 'tpv' AND list_contains(modalities, 'instance_id');
 ```
 
-- 开发机上批量搬运用 ossutil（已装已配）：`ossutil sync oss://… /mnt/cpfs/… --update`。
+- 开发机上批量搬运用 ossutil（已装已配，机器信息见集群使用指南）：`ossutil sync oss://… /mnt/cpfs/… --update`。
 
 ## 读数据的固定流程
 
-1. 实验开始时读一次 `game/catalog/latest.json`，把快照戳记进实验配置；此后**只读**
-   `game/catalog/snapshots/<stamp>/`（不可变 → 实验可复现）。不要引用 `catalog/` 根下的便捷副本。
+1. 实验开始时读一次 `<数据根>/catalog/latest.json`，把快照戳记进实验配置；此后**只读**
+   `<数据根>/catalog/snapshots/<stamp>/`（不可变 → 实验可复现）。不要引用 `catalog/` 根下的便捷副本。
 2. `summary.json` 的 `min_reader_version` 高于加载器支持版本 → 直接报错退出。
 3. 从快照的 `sessions.jsonl`/`sessions.parquet` 选会话：按 `facets`（camera/viewpoint/locomotion）、
    `modalities`、`schema_version` 过滤。**不要解析 `dataset_id` 字符串推断属性**。
@@ -93,7 +93,7 @@ WHERE viewpoint = 'tpv' AND list_contains(modalities, 'instance_id');
   0 = ignore（未标注，不是背景类，不得进损失）；空间重采样仅可最近邻；非零 id 段内恒定，
   必在 `instance_table.json` 有条目。
 - **语义类别图不交付**：用实例帧 × `instance_table` 的 id→coarse LUT 派生，天空按 depth 非有限
-  填 sky 类；粗类表在 `game/catalog/semantic_taxonomy.json`（255 恒为 ignore）。训练 pin 词表版本
+  填 sky 类；粗类表在 `<数据根>/catalog/semantic_taxonomy.json`（255 恒为 ignore）。训练 pin 词表版本
   （catalog 行 `vocab` 字段 / 实例表 `vocab_ref`）。
 - **坐标**：一切世界坐标 glTF 右手系、Y-up、米；四元数恒 `[x,y,z,w]`；节点 `rotation`
   已预复合几何基校正，摆放 GLB 不要再做轴变换。反投影公式见坐标子文档。
@@ -108,6 +108,6 @@ WHERE viewpoint = 'tpv' AND list_contains(modalities, 'instance_id');
 
 ## 不要做
 
-- 不遍历 bucket 选数据（只走 catalog）；不读 `game/` 之外的前缀（属其他团队）。
+- 不遍历 bucket 选数据（只走 catalog）；不读数据根之外的前缀（属其他团队）。
 - 不在训练里引用"线上最新"（集合漂移）；固定实验集 = 钉快照。
 - 不假设分段连续、不假设引用必有文件、不从 `dataset_id` 字符串猜采集条件。
