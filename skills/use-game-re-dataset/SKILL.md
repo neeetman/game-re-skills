@@ -87,14 +87,60 @@ WHERE viewpoint = 'tpv' AND list_contains(modalities, 'instance_id');
 
 ## 格式要点（会咬人的）
 
+- **列式 sidecar（v8）**：随内容规模增长的文件全是 parquet，按访问键排序——相机（`cam_*`）与
+  输入（`input_*`）是 `video/meta.parquet` 的列（无 camera_info/input_frames 文件）；动态物体在
+  `dynamic_transforms.parquet`（一行 = sample×object）；骨骼逐样本事实在 `bone_grid.parquet`、
+  骨架定义（bone_order/parents）在 `skeletons.parquet`，`bone_transforms.meta.json` 只是 O(1) 头；
+  实例表是 `instance_table.parquet`（一行一实例、按 local_id 排序，header 在 parquet 元数据，
+  语义 LUT 只读 local_id+coarse 两列；静态实例的包围盒读 obb_* 列，多节点实例已在发布时拟合，不要自行重算——动态实例逐样本走 object_id join dynamic_transforms）。抽 5 秒分片用范围谓词读（row-group/列裁剪），不要整读再切。
+  静态场景是 `static_scene.parquet`（按 id 排序），按 `instance_table.node_ids` 点查即可；
+  marker 场景绑定字段是 `static_scene_hash`（逻辑内容 hash）。`asset_scope == "session"` 的行
+  （`glb/terrain.glb`、2026-09-16 起的 `glb/water_<id16>.glb` = UE Water 插件的湖/河/海）不在
+  共享资产库里，解析到会话的 `session-assets/`，且是世界放置（identity 变换、顶点已是 glTF 米）；
+  水体行 `semantic_label == "water"`，`extras` 里带采集的 `water{kind,surface_z,points,widths,extent,mesh_sibling}`
+  和 `water_body_loc`（UE cm），不想读 glb 可用 `processkit.water_surface.build_water_surface` 自己出面。
 - **depth.mkv**：gray16le 载荷是 **float16 位模式**（按位重解释，不是整数毫米）；单位米；
   天空 +inf，进损失前屏蔽非有限值。
 - **instance_id.mkv**：同为 gray16le 但是 **raw uint16**——与 depth 解码方式不同，勿混用；
   0 = ignore（未标注，不是背景类，不得进损失）；空间重采样仅可最近邻；非零 id 段内恒定，
-  必在 `instance_table.json` 有条目。
+  必在 `instance_table.parquet` 有条目。
 - **语义类别图不交付**：用实例帧 × `instance_table` 的 id→coarse LUT 派生，天空按 depth 非有限
-  填 sky 类；粗类表在 `<数据根>/catalog/semantic_taxonomy.json`（255 恒为 ignore）。训练 pin 词表版本
-  （catalog 行 `vocab` 字段 / 实例表 `vocab_ref`）。
+  填 sky 类；粗类表在 `<数据根>/catalog/semantic_taxonomy.json`（255 恒为 ignore）。
+  **但 LUT 的类要走 `vocab_key` 现查词表，不要直接用 `coarse` 列**：该列是生成当时那份规则的
+  缓存，词表是现值（交付规范 §6）。会话行的 `vocab` 版本低于该游戏当前词表版本时差别是决定性的——
+  star_rupture / palworld 的 v1 词表是在两个游戏都还没有自己的语义规则时生成的，`coarse` 列因此
+  95%+ 是 `static_unknown`；换成 v2 现查，同样的像素 99.99% 带类。查法：
+  `local_id → vocab_key`（表里每行都有）`→ vocab.entries[key].coarse_class`，命中率实测 100%。
+  `"excluded": true` 的条目表示那行不是物体（贴花平面等），按 ignore 处理。
+  训练要可复现就 pin 词表版本（显式记下你用的那一版，而不是照抄 `vocab_ref`）。
+- **地被 vs 物体**：训练数据通常不想要「每根草一个实例」。判据是**逐实例的几何**，不是资产名，
+  也不是类：同一个网格会被摆成很多尺寸（`SM_Cliff_Small_D` 从 0.44 m 用到 6.88 m，p10→p90 差 15 倍），
+  而名字直接撒谎（`SM_Rock_Large_2_CliffMI` 实测 0.44 m，`Grass_small_b05_sm` 占地 1.96 m）。
+  实例表每行的 `obb_vertices` 就是尺子，`devtools/tools/tag_instance_scale_tier.py` 出一份按
+  `local_id` 的 sidecar（`instance_scale_tier/1`），**已发布的段不用重跑也能用**。四档：
+  `low_vegetation`（地被，排除或并入地形）/ `pebble`（小石子，排除）/ `low_wide_rock`（**未定**：
+  砾石铺装、石板、矿脉三者包围盒分不开，要人或 VLM 裁）/ `keep`。
+  判据用定向盒的**边长**，不是世界竖直高度——铺在坡上的苔藓垫竖直方向能有 2 m，但它还是垫子；
+  实测改用竖直高度会让 93% 的苔藓丢档。植被两条任一命中即算地被：`longest < veg_max_size`（小植物，
+  什么形状都算）或 `thickness/longest < flatness`（垫子，多大都算）——树枝两条都不中，活下来。
+  石头用同样两个数、不同意图：`longest < rock_max_size` 是石子，更大但扁的进 `low_wide_rock`。
+  **阈值是策略不是测量，而且逐游戏不同**：star_rupture 用 `--veg-max-size 1.0`（灌木在 1.07–1.56，
+  边界很挤），palworld 要 `--veg-max-size 3.0`（草/三叶草/灌木一路到 2.73 m，再往上直接是 11 m 的树，
+  中间是空的）。实测覆盖：star_rupture 83.6% 的实例是 `low_vegetation`+`pebble`，palworld 85.4%。
+  **`label_source` 和 `class_source` 是两个来源，别当成一个**：前者说 `fine_label` 怎么来的
+  （四级：asset_name/render_probe/frame_crop/manual），后者说 `coarse_class` 怎么来的
+  （`rules`=由 `rules.<game>.json` 解析、`llm`/`vlm`=模型改的、`manual`=校准文件里改的、
+  `table`=没跑规则，沿用实例表缓存的旧值）。一个标签从资产名派生的条目，它的类完全可以是
+  模型改过的——所以看到 `label_source: "asset_name"` 不代表这一条没被自动判过类。
+  文档级另有 `coarse_source` 记用的哪一份规则文件。v1/v2 词表没有 `class_source` 字段
+  （加字段是 additive，v3 起才带），缺失时按 `rules` 理解 v2、按 `table` 理解 v1。
+  **两个口径都要报**：实测 star_rupture seg_000 150 帧，`low_vegetation`+`pebble` 占
+  **83.0% 的实例**但只占 **24.6% 的已标注像素**（全画面的 5.4%）。实例口径对应 id 碎片化、
+  逐物体监督、粗几何的物体数（四个砾石网格就是全游戏 65.7% 的实例）；像素口径才是标签图实际改变多少。
+  别用前者去说后者。（同一次测量里另有 78% 的像素是 id 0——那是「未标注，不进损失」，不是背景类，未深究。）
+  类来自词表而不是 `coarse` 列（见上条），几何管「是不是碎屑」、类管「这东西适不适用碎屑这个说法」——
+  正是这个合取保住了低矮的结构和道具（`SM_ConnectingPlatformRubble` 0.25 m、`SM_Bag_Dummy` 0.49 m、
+  `SM_Roof_Wood` 0.36 m 厚 4 m 宽，全部 `keep`）。
 - **坐标**：一切世界坐标 glTF 右手系、Y-up、米；四元数恒 `[x,y,z,w]`；节点 `rotation`
   已预复合几何基校正，摆放 GLB 不要再做轴变换。反投影公式见坐标子文档。
 - **相机**：`far_mode="infinite"`、`far_m=null` 是常态；depth/normal 分辨率是 RGB 一半，
